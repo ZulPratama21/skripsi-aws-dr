@@ -1,0 +1,13 @@
+# Abaikan folder provider & modul Terraform
+.terraform/
+**/.terraform/
+
+# Abaikan file state Terraform (berisi data sensitif & IP internal)
+*.tfstate
+*.tfstate.*
+**/*.tfstate
+**/*.tfstate.*
+
+# Abaikan file kunci variabel & log
+*.tfvars
+*.log
