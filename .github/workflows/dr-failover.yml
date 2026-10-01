@@ -1,0 +1,29 @@
+name: GitOps DR Failover (Region B Activation)
+
+on:
+  # Mengizinkan eksekusi manual (klik tombol) untuk pengujian awal
+  workflow_dispatch: 
+  # Mengizinkan eksekusi otomatis yang dipicu (trigger) oleh sinyal AWS CloudWatch
+  repository_dispatch:
+    types: [aws-cloudwatch-trigger] 
+
+jobs:
+  execute-ansible:
+    name: Provision Pilot Light via Ansible
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v3
+
+      - name: Set up SSH Access to Region B
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ANSIBLE_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST_REGION_B }} >> ~/.ssh/known_hosts
+
+      - name: Run Ansible Playbook (Just-in-Time Provisioning)
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook -i "${{ secrets.EC2_HOST_REGION_B }}," -u ubuntu --private-key ~/.ssh/id_rsa ansible/failover-playbook.yml
