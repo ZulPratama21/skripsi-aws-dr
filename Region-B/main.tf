@@ -105,24 +105,31 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-# 8. Server EC2 Region B (Pilot Light - NGINX Siap dengan Tampilan Secondary)
-resource "aws_instance" "web_server_b" {
-  ami                   = data.aws_ami.ubuntu.id
-  instance_type         = "t3.micro"
-  subnet_id             = aws_subnet.public_subnet.id
-  vpc_security_group_ids = [aws_security_group.web_sg.id]
+# 7b. Membuat SSH Key Pair secara dinamis untuk akses Ansible
+resource "tls_private_key" "ansible_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
 
-  user_data = <<-EOF
-              #!/bin/bash
-              apt-get update -y
-              apt-get install -y nginx
-              systemctl start nginx
-              systemctl enable nginx
-              echo "<h1>[REGION B - SECONDARY PILOT LIGHT] Web Server Failover Active!</h1>" > /var/www/html/index.html
-              EOF
+resource "aws_key_pair" "region_b_key" {
+  key_name   = "skripsi-ansible-key-b"
+  public_key = tls_private_key.ansible_key.public_key_openssh
+}
+
+# 8. Server EC2 Region B (Pilot Light - Server OS Kosong)
+resource "aws_instance" "web_server_b" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.public_subnet.id
+  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  
+  # Memasang "Gembok" (Public Key) ke server ini
+  key_name               = aws_key_pair.region_b_key.key_name
+
+  # Skrip user_data DIHAPUS. Server akan standby dalam keadaan kosong.
 
   tags = {
-    Name = "Skripsi-WebServer-RegionB"
+    Name = "Skripsi-WebServer-RegionB-Standby"
   }
 }
 
@@ -130,4 +137,11 @@ resource "aws_instance" "web_server_b" {
 output "web_server_b_public_ip" {
   value       = "http://${aws_instance.web_server_b.public_ip}"
   description = "Akses URL Web Server Region B di Browser Anda"
+}
+
+# Output Private Key (Kunci ini akan kita simpan di GitHub Secrets untuk Ansible)
+output "ansible_private_key" {
+  value       = tls_private_key.ansible_key.private_key_pem
+  sensitive   = true
+  description = "Private Key SSH untuk Ansible"
 }
