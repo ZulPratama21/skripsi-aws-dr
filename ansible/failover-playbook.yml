@@ -1,0 +1,35 @@
+---
+- name: Otomatisasi Pemulihan Layanan (Disaster Recovery) ke Region B
+  hosts: all
+  become: yes # Meminta akses Root (sudo)
+  tasks:
+    - name: Update APT repository & Install NGINX
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Pastikan service NGINX berjalan
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Deploy halaman HTML Failover (Bukti Ansible Berjalan)
+      copy:
+        dest: /var/www/html/index.html
+        content: |
+          <html>
+          <head>
+              <title>Skripsi DR Lab - Region B</title>
+              <style>
+                  body { font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background-color: #ffebee; }
+                  h1 { color: #c62828; }
+                  .status { padding: 15px; background-color: #f44336; color: white; display: inline-block; border-radius: 5px; }
+              </style>
+          </head>
+          <body>
+              <h1>[REGION B - SECONDARY PILOT LIGHT]</h1>
+              <div class="status">Status: Failover Active (Deployed by Ansible & GitOps)</div>
+          </body>
+          </html>
