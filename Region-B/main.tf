@@ -141,7 +141,7 @@ output "web_server_b_public_ip" {
 
 # Output Private Key (Kunci ini akan kita simpan di GitHub Secrets untuk Ansible)
 output "ansible_private_key" {
-  value       = tls_private_key.ansible_key.private_key_pem
+  value       = tls_private_key.ansible_key.private_key_openssh
   sensitive   = true
   description = "Private Key SSH untuk Ansible"
 }
