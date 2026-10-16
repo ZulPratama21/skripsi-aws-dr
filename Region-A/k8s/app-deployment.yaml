@@ -1,3 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-content-config
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Skripsi Disaster Recovery - Region A (Singapura)</title>
+    </head>
+    <body>
+        <h1>Sistem Disaster Recovery Aktif di Region A (EKS AWS)</h1>
+        <p>Status: Berjalan Normal (Simulasi Live Workload)</p>
+    </body>
+    </html>
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,6 +34,10 @@ spec:
         image: nginx:alpine
         ports:
         - containerPort: 80
+        volumeMounts:
+        - name: html-volume
+          mountPath: /usr/share/nginx/html/index.html
+          subPath: index.html
         resources:
           requests:
             cpu: "50m"
@@ -24,6 +45,10 @@ spec:
           limits:
             cpu: "100m"
             memory: "128Mi"
+      volumes:
+      - name: html-volume
+        configMap:
+          name: web-content-config
 ---
 apiVersion: v1
 kind: Service
