@@ -3,7 +3,7 @@
 # CloudFront is a global service; no hosted zone or custom domain is required.
 
 variable "region_b_elastic_ip" {
-  description = "Static Elastic IP for the stopped-standby EC2 instance in Tokyo"
+  description = "Elastic IP EC2 Tokyo dari output Terraform Region B"
   type        = string
 
 }
@@ -23,8 +23,8 @@ resource "aws_cloudfront_distribution" "dr_failover" {
   price_class         = "PriceClass_200"
 
   origin {
-    domain_name                = local.region_a_origin_dns
-    origin_id                  = "region-a-primary"
+    domain_name         = local.region_a_origin_dns
+    origin_id           = "region-a-primary"
     connection_attempts = 1
     connection_timeout  = 3
 
@@ -38,8 +38,8 @@ resource "aws_cloudfront_distribution" "dr_failover" {
   }
 
   origin {
-    domain_name                = local.region_b_origin_dns
-    origin_id                  = "region-b-secondary"
+    domain_name         = local.region_b_origin_dns
+    origin_id           = "region-b-secondary"
     connection_attempts = 1
     connection_timeout  = 3
 
