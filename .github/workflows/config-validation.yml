@@ -1,0 +1,39 @@
+name: Static checks for EC2-only DR lab
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  static-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format Terraform before validation
+        run: |
+          terraform -chdir=Region-A fmt -recursive
+          terraform -chdir=Region-B fmt -recursive
+      - name: Validate Region A Terraform (no AWS deployment)
+        run: |
+          terraform -chdir=Region-A init -backend=false -input=false
+          terraform -chdir=Region-A validate
+      - name: Validate Region B Terraform (no AWS deployment)
+        run: |
+          terraform -chdir=Region-B init -backend=false -input=false
+          terraform -chdir=Region-B validate
+      - name: Ansible syntax check
+        run: |
+          python3 -m pip install --user 'ansible-core>=2.18,<2.21'
+          "$HOME/.local/bin/ansible-playbook" --syntax-check -i 'localhost,' ansible/failover-playbook.yml
+      - name: Python syntax check
+        run: python3 -m py_compile scripts/verify_dr.py
+      - name: Assert no EKS Terraform resources remain
+        run: |
+          if grep -R --include='*.tf' -E 'resource[[:space:]]+"aws_eks_' Region-A Region-B; then
+            echo 'EKS IaC still present'; exit 1
+          fi
+          if test -d Region-A/k8s; then
+            echo 'Delete old Region-A/k8s tracked manifests before submitting the patch'; exit 1
+          fi

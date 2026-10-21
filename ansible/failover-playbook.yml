@@ -1,0 +1,61 @@
+---
+- name: Start secondary HTTP service on already-provisioned EC2 Region B
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ensure nginx is installed (normally preinstalled before stopping EC2)
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: false
+
+    - name: Deploy the same stateless HTTP application as Region A
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../Region-A/app/index.html"
+        dest: /var/www/html/index.html
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Deploy readiness endpoint
+      ansible.builtin.copy:
+        dest: /var/www/html/healthz
+        content: "ready\n"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Set HTTP serving-region header
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/dr-region.conf
+        content: "add_header X-DR-Region \"region-b\" always;\n"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Start nginx but DO NOT enable on next boot (lab reset invariant)
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: false
+
+    - name: Flush changes before verification
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify secondary HTTP readiness locally
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz
+        method: GET
+        status_code: 200
+      register: readiness
+      retries: 8
+      delay: 3
+      until: readiness.status == 200
+
+  handlers:
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
