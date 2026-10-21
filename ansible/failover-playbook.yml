@@ -1,61 +1,60 @@
 ---
-- name: Start secondary HTTP service on already-provisioned EC2 Region B
+- name: Activate stateless HTTP disaster-recovery workload on Region B
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false
   tasks:
-    - name: Ensure nginx is installed (normally preinstalled before stopping EC2)
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 180
+
+    - name: Install NGINX
       ansible.builtin.apt:
         name: nginx
         state: present
-        update_cache: false
+        update_cache: true
+        cache_valid_time: 3600
 
-    - name: Deploy the same stateless HTTP application as Region A
+    - name: Deploy same application content as Region A
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../Region-A/app/index.html"
         dest: /var/www/html/index.html
         owner: root
         group: root
         mode: '0644'
+        content: |
+          <!doctype html>
+          <html lang="id">
+          <head><meta charset="utf-8"><title>AWS DR Research Lab</title></head>
+          <body>
+            <h1>DR LABORATORY WORKLOAD - SERVICE OK</h1>
+            <p>Stateless HTTP application for controlled recovery experiments.</p>
+          </body>
+          </html>
 
-    - name: Deploy readiness endpoint
+    - name: Deploy health endpoint
       ansible.builtin.copy:
         dest: /var/www/html/healthz
-        content: "ready\n"
         owner: root
         group: root
         mode: '0644'
+        content: "ready\n"
 
-    - name: Set HTTP serving-region header
+    - name: Mark HTTP responses as Region B
       ansible.builtin.copy:
         dest: /etc/nginx/conf.d/dr-region.conf
-        content: "add_header X-DR-Region \"region-b\" always;\n"
         owner: root
         group: root
         mode: '0644'
-      notify: Reload nginx
+        content: |
+          add_header X-DR-Region "region-b" always;
 
-    - name: Start nginx but DO NOT enable on next boot (lab reset invariant)
-      ansible.builtin.service:
+    - name: Verify NGINX configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Start NGINX for recovery; disable boot-time autostart
+      ansible.builtin.systemd:
         name: nginx
-        state: started
+        state: restarted
         enabled: false
-
-    - name: Flush changes before verification
-      ansible.builtin.meta: flush_handlers
-
-    - name: Verify secondary HTTP readiness locally
-      ansible.builtin.uri:
-        url: http://127.0.0.1/healthz
-        method: GET
-        status_code: 200
-      register: readiness
-      retries: 8
-      delay: 3
-      until: readiness.status == 200
-
-  handlers:
-    - name: Reload nginx
-      ansible.builtin.service:
-        name: nginx
-        state: reloaded

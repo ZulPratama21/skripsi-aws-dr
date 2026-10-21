@@ -1,146 +1,144 @@
-name: EC2 DR Failover - Manual vs Automatic Trigger
+name: AWS DR Failover - EC2 Tokyo
 
 on:
   workflow_dispatch:
+    inputs:
+      verify_cloudfront:
+        description: "Verify CloudFront returns region-b (run after primary failure injection)"
+        required: true
+        type: boolean
+        default: true
   repository_dispatch:
     types: [aws-cloudwatch-trigger]
 
 permissions:
-  contents: read
   id-token: write
+  contents: read
 
 concurrency:
-  group: dr-activation-region-b
+  group: dr-lab-region-b-activation
   cancel-in-progress: false
 
 jobs:
-  activate-secondary:
-    name: Start EC2 Region B and activate NGINX
+  recover:
+    # Automatic trigger stays blocked until explicitly enabled tomorrow.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.DR_ALLOW_AUTO == 'true' }}
     runs-on: ubuntu-latest
     environment: dr-lab
     timeout-minutes: 25
+    env:
+      AWS_REGION: ap-northeast-1
+      AWS_ROLE_ARN: ${{ vars.AWS_DR_ROLE_ARN }}
+      REGION_B_INSTANCE_ID: ${{ vars.REGION_B_INSTANCE_ID }}
+      REGION_B_SECURITY_GROUP_ID: ${{ vars.REGION_B_SECURITY_GROUP_ID }}
+      REGION_B_EIP: ${{ vars.REGION_B_EIP }}
+      REGION_B_SSH_HOSTKEY_SHA256: ${{ vars.REGION_B_SSH_HOSTKEY_SHA256 }}
+      CLOUDFRONT_URL: ${{ vars.CLOUDFRONT_URL }}
+      VERIFY_CLOUDFRONT: ${{ github.event_name == 'repository_dispatch' || inputs.verify_cloudfront }}
+
     steps:
-      - name: Checkout research repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Record experiment metadata
+      - name: Validate configuration
         shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          for name in AWS_ROLE_ARN REGION_B_INSTANCE_ID REGION_B_SECURITY_GROUP_ID REGION_B_EIP REGION_B_SSH_HOSTKEY_SHA256 CLOUDFRONT_URL; do
+            test -n "${!name:-}" || { echo "::error::Missing GitHub Environment variable $name"; exit 1; }
+          done
+          test -n "$SSH_PRIVATE_KEY" || { echo '::error::Missing ANSIBLE_SSH_KEY environment secret'; exit 1; }
+          python3 -c 'import ipaddress,sys;ipaddress.IPv4Address(sys.argv[1])' "$REGION_B_EIP"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: skripsi-dr-github
+
+      - name: Start EC2, deploy Ansible, verify recovery
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
         run: |
           set -euo pipefail
           mkdir -p evidence
-          printf 'run_id=%s\ntrigger=%s\nstarted_at=%s\ncommit=%s\n' \
-            "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            "$GITHUB_SHA" | tee evidence/run-metadata.txt
-          echo "### AWS EC2-only DR trial" >> "$GITHUB_STEP_SUMMARY"
-          echo "Trigger: $GITHUB_EVENT_NAME" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Configure temporary AWS credentials with GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DR_ROLE_ARN }}
-          aws-region: ap-northeast-1
-
-      - name: Start stopped Region B EC2 (identical for manual and auto)
-        env:
-          EC2_INSTANCE_ID_B: ${{ secrets.EC2_INSTANCE_ID_B }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${EC2_INSTANCE_ID_B:?Missing EC2_INSTANCE_ID_B}"
-          CURRENT="$(aws ec2 describe-instances --instance-ids "$EC2_INSTANCE_ID_B" --query 'Reservations[0].Instances[0].State.Name' --output text)"
-          printf 'region_b_previous_state=%s\n' "$CURRENT" >> evidence/run-metadata.txt
-          if [[ "$CURRENT" != stopped ]]; then
-            echo "::error::Controlled trials require Region B to be STOPPED before each trial (was $CURRENT)."
-            exit 1
-          fi
-          echo "instance_start_requested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
-          aws ec2 start-instances --instance-ids "$EC2_INSTANCE_ID_B" --output json > evidence/start-instance.json
-          aws ec2 wait instance-status-ok --instance-ids "$EC2_INSTANCE_ID_B"
-          echo "instance_status_ok_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
-
-      - name: Allow temporary SSH from runner IPv4 only
-        id: ssh-ingress
-        env:
-          EC2_SECURITY_GROUP_ID_B: ${{ secrets.EC2_SECURITY_GROUP_ID_B }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${EC2_SECURITY_GROUP_ID_B:?Missing EC2_SECURITY_GROUP_ID_B}"
-          PUBLIC_IP="$(curl -fsS --max-time 10 https://checkip.amazonaws.com | tr -d '\r\n')"
-          [[ "$PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || exit 1
-          CIDR="${PUBLIC_IP}/32"
-          echo "cidr=$CIDR" >> "$GITHUB_OUTPUT"
-          aws ec2 authorize-security-group-ingress --group-id "$EC2_SECURITY_GROUP_ID_B" \
-            --protocol tcp --port 22 --cidr "$CIDR"
-
-      - name: Prepare Ansible and verified SSH host key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
-          ANSIBLE_KNOWN_HOSTS: ${{ secrets.ANSIBLE_KNOWN_HOSTS }}
-          EC2_HOST_REGION_B: ${{ secrets.EC2_HOST_REGION_B }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m pip install --user 'ansible-core>=2.18,<2.21'
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          : "${SSH_PRIVATE_KEY:?Missing ANSIBLE_SSH_KEY}"
-          : "${ANSIBLE_KNOWN_HOSTS:?Missing verified ANSIBLE_KNOWN_HOSTS}"
-          : "${EC2_HOST_REGION_B:?Missing EC2_HOST_REGION_B}"
+          echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > evidence/workflow-timestamps.txt
+          echo "event_name=$GITHUB_EVENT_NAME" >> evidence/workflow-timestamps.txt
+          echo "run_id=$GITHUB_RUN_ID" >> evidence/workflow-timestamps.txt
+          echo "commit_sha=$GITHUB_SHA" >> evidence/workflow-timestamps.txt
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/id_rsa"
           chmod 600 "$HOME/.ssh/id_rsa"
-          printf '%s\n' "$ANSIBLE_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-          ssh-keygen -y -f "$HOME/.ssh/id_rsa" >/dev/null
-          ssh-keygen -F "$EC2_HOST_REGION_B" -f "$HOME/.ssh/known_hosts" >/dev/null
+          ssh-keygen -y -f "$HOME/.ssh/id_rsa" > /dev/null
 
-      - name: Activate NGINX on Region B (Ansible)
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: 'True'
-          EC2_HOST_REGION_B: ${{ secrets.EC2_HOST_REGION_B }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "ansible_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
-          ansible-playbook -i "${EC2_HOST_REGION_B}," -u ubuntu \
-            --private-key "$HOME/.ssh/id_rsa" \
-            -e 'ansible_ssh_common_args=-o StrictHostKeyChecking=yes' \
-            ansible/failover-playbook.yml
-          echo "ansible_finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
+          aws ec2 start-instances --region "$AWS_REGION" --instance-ids "$REGION_B_INSTANCE_ID" > evidence/start-instances.json
+          aws ec2 wait instance-running --region "$AWS_REGION" --instance-ids "$REGION_B_INSTANCE_ID"
+          aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$REGION_B_INSTANCE_ID"
+          echo "ec2_status_ok_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> evidence/workflow-timestamps.txt
 
-      - name: Verify Region B application, not just successful pipeline
-        env:
-          EC2_HOST_REGION_B: ${{ secrets.EC2_HOST_REGION_B }}
-          DR_FQDN: ${{ vars.DR_FQDN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/verify_dr.py --url "http://${EC2_HOST_REGION_B}" \
-            --expected-header region-b --timeout 150 --output evidence/region-b-direct.json
-          echo "secondary_ready_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
-          if [[ -n "$DR_FQDN" ]]; then
-            python3 scripts/verify_dr.py --url "http://${DR_FQDN}" \
-              --expected-header region-b --timeout 240 --output evidence/region-b-dns.json
-            echo "dns_failover_verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> evidence/run-metadata.txt
-          else
-            echo "DNS verification skipped: set GitHub Environment variable DR_FQDN" >> "$GITHUB_STEP_SUMMARY"
+          RUNNER_IP="$(curl --fail --silent --show-error --retry 3 https://checkip.amazonaws.com | tr -d '\r\n')"
+          python3 -c 'import ipaddress,sys;ipaddress.IPv4Address(sys.argv[1])' "$RUNNER_IP"
+          RUNNER_CIDR="$RUNNER_IP/32"
+          GRANTED=0
+          cleanup() {
+            if [ "$GRANTED" = 1 ]; then
+              aws ec2 revoke-security-group-ingress --region "$AWS_REGION" \
+                --group-id "$REGION_B_SECURITY_GROUP_ID" --protocol tcp --port 22 \
+                --cidr "$RUNNER_CIDR" >/dev/null || echo '::warning::SSH revoke failed: remove rule manually'
+            fi
+            rm -f "$HOME/.ssh/id_rsa"
+          }
+          trap cleanup EXIT
+          aws ec2 authorize-security-group-ingress --region "$AWS_REGION" \
+            --group-id "$REGION_B_SECURITY_GROUP_ID" --protocol tcp --port 22 \
+            --cidr "$RUNNER_CIDR" > /dev/null
+          GRANTED=1
+
+          # Compare SSH host key obtained over the network with an expected fingerprint
+          # verified independently via AWS EC2 console output or trusted administration.
+          FOUND=0
+          for i in $(seq 1 45); do
+            if ssh-keyscan -T 5 -t ed25519 "$REGION_B_EIP" 2>/dev/null > "$HOME/.ssh/known_hosts" && [ -s "$HOME/.ssh/known_hosts" ]; then
+              FOUND=1
+              break
+            fi
+            sleep 4
+          done
+          test "$FOUND" = 1 || { echo '::error::SSH not reachable'; exit 1; }
+          ACTUAL_FINGERPRINT="$(ssh-keygen -lf "$HOME/.ssh/known_hosts" -E sha256 | awk 'NR==1 {print $2}')"
+          if [ "$ACTUAL_FINGERPRINT" != "$REGION_B_SSH_HOSTKEY_SHA256" ]; then
+            echo '::error::SSH host key fingerprint mismatch'; exit 1
           fi
 
-      - name: Revoke temporary SSH rule even on failure
-        if: ${{ always() && steps.ssh-ingress.outputs.cidr != '' }}
-        env:
-          EC2_SECURITY_GROUP_ID_B: ${{ secrets.EC2_SECURITY_GROUP_ID_B }}
-          CIDR: ${{ steps.ssh-ingress.outputs.cidr }}
-        shell: bash
-        run: |
-          aws ec2 revoke-security-group-ingress --group-id "$EC2_SECURITY_GROUP_ID_B" \
-            --protocol tcp --port 22 --cidr "$CIDR"
+          python3 -m venv /tmp/skripsi-ansible-venv
+          /tmp/skripsi-ansible-venv/bin/python -m pip install --quiet 'ansible-core>=2.17,<2.20'
+          ANSIBLE_HOST_KEY_CHECKING=True \
+            /tmp/skripsi-ansible-venv/bin/ansible-playbook \
+            -i "${REGION_B_EIP}," -u ubuntu \
+            --private-key "$HOME/.ssh/id_rsa" \
+            ansible/failover-playbook.yml | tee evidence/ansible-output.log
 
-      - name: Store evidence for BAB IV
+          echo "ansible_complete_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> evidence/workflow-timestamps.txt
+          python3 scripts/verify_dr.py --base-url "http://$REGION_B_EIP" --region region-b \
+            --attempts 10 --interval 4 --output evidence/region-b-direct.json
+
+          if [ "$VERIFY_CLOUDFRONT" = true ]; then
+            python3 scripts/verify_dr.py --base-url "$CLOUDFRONT_URL" --region region-b \
+              --attempts 30 --interval 5 --output evidence/region-b-cloudfront.json
+          else
+            echo 'CloudFront verification skipped by explicit manual workflow input' > evidence/cloudfront-skipped.txt
+          fi
+          echo "recovery_complete_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> evidence/workflow-timestamps.txt
+
+      - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ec2-dr-evidence-${{ github.run_id }}
+          name: dr-evidence-${{ github.run_id }}
           path: evidence/
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14

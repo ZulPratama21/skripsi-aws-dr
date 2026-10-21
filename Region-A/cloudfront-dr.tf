@@ -5,12 +5,12 @@
 variable "region_b_elastic_ip" {
   description = "Static Elastic IP for the stopped-standby EC2 instance in Tokyo"
   type        = string
-  default     = "35.73.68.202"
+
 }
 
 locals {
   # CloudFront custom origins require DNS names, not raw IPv4 addresses.
-  # Both EC2 origins use Elastic IPs so their public hostnames remain stable.
+  # Region B EIP is supplied from Terraform Region B output, not hard-coded.
   region_a_origin_dns = aws_eip.primary_static_ip.public_dns
   region_b_origin_dns = "ec2-${replace(var.region_b_elastic_ip, ".", "-")}.ap-northeast-1.compute.amazonaws.com"
 }
@@ -23,8 +23,8 @@ resource "aws_cloudfront_distribution" "dr_failover" {
   price_class         = "PriceClass_200"
 
   origin {
-    domain_name         = local.region_a_origin_dns
-    origin_id           = "region-a-primary"
+    domain_name                = local.region_a_origin_dns
+    origin_id                  = "region-a-primary"
     connection_attempts = 1
     connection_timeout  = 3
 
@@ -38,8 +38,8 @@ resource "aws_cloudfront_distribution" "dr_failover" {
   }
 
   origin {
-    domain_name         = local.region_b_origin_dns
-    origin_id           = "region-b-secondary"
+    domain_name                = local.region_b_origin_dns
+    origin_id                  = "region-b-secondary"
     connection_attempts = 1
     connection_timeout  = 3
 
